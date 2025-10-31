@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Genetic real-estate simulator</title>
+  <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; margin: 16px; }
+    .row { display:flex; gap:12px; align-items: center; margin-bottom:8px; }
+    .col { display:flex; flex-direction:column; gap:6px; }
+    label { font-size:0.9rem }
+    input[type="number"], input[type="text"] { width:120px }
+    #controls { margin-bottom:16px; display:flex; gap:24px; }
+    #plots { display:grid; grid-template-columns: 1fr 420px; gap:12px; }
+    #paramsPlots { display:grid; grid-template-columns: repeat(2, 1fr); gap:12px; }
+    .smallPlot { height:220px; }
+    #mainPlot { height:520px; }
+    button { padding:6px 10px }
+  </style>
+</head>
+<body>
+  <h2>Genetic real-estate simulator (browser)</h2>
+  <div id="controls">
+    <div class="col">
+      <div class="row"><label>Age:</label><input id="age" type="number" value="26"></div>
+      <div class="row"><label>Max age:</label><input id="max_age" type="number" value="60"></div>
+      <div class="row"><label>Target age:</label><input id="target_age" type="number" value="50"></div>
+      <div class="row"><label>Revenue R (€/mois):</label><input id="R" type="number" value="5000"></div>
+      <div class="row"><label>Costs C (€/mois):</label><input id="C" type="number" value="3000"></div>
+      <div class="row"><label>Rent L (€/mois):</label><input id="L" type="number" value="1300"></div>
+      <div class="row"><label>Initial financial Pfi (€/tot):</label><input id="Pfi" type="number" value="40000"></div>
+    </div>
+
+    <div class="col">
+      <div class="row"><label>Financial annual return %:</label><input id="Rf_ann" type="number" value="6"></div>
+      <div class="row"><label>Real estate annual return %:</label><input id="Ri_ann" type="number" value="3.3"></div>
+      <div class="row"><label>Notarial fees %:</label><input id="notarial_fees" type="number" value="8"></div>
+      <div class="row"><label>Loan durations (years,comma):</label><input id="loan_durations" type="text" value="7,10,15,20,25"></div>
+      <div class="row"><label>Loan rates annual % (comma):</label><input id="loan_rates" type="text" value="3,3.05,3.18,3.24,3.38"></div>
+    </div>
+
+    <div class="col">
+      <div class="row"><label>POP_SIZE:</label><input id="POP_SIZE" type="number" value="200"></div>
+      <div class="row"><label>N_GENERATIONS:</label><input id="N_GENERATIONS" type="number" value="400"></div>
+      <div class="row"><label>MUT_RATE:</label><input id="MUT_RATE" type="number" step="0.01" value="0.2"></div>
+      <div class="row"><label>ELITE_FRAC:</label><input id="ELITE_FRAC" type="number" step="0.01" value="0.2"></div>
+      <div class="row"><label>I min,max (€/k):</label><input id="I_bounds" type="text" value="250000,400000"></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="runBtn">Run optimization</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <div id="status" style="margin-left:12px"></div>
+  </div>
+
+  <div id="plots">
+    <div>
+      <div id="mainPlot"></div>
+      <div id="paramsPlots">
+        <div id="plot_value" class="smallPlot"></div>
+        <div id="plot_t" class="smallPlot"></div>
+        <div id="plot_I" class="smallPlot"></div>
+        <div id="plot_M" class="smallPlot"></div>
+        <div id="plot_duration" class="smallPlot"></div>
+        <div id="plot_rate" class="smallPlot"></div>
+      </div>
+    </div>
+    <div>
+      <h4>Best solution</h4>
+      <pre id="bestText">—</pre>
+      <h4>Legend / notes</h4>
+      <p>Stack: financial assets (blue), real-estate (green), loans (red). Dashed black: pure financial assets.</p>
+    </div>
+  </div>
+
+  <script>
+  // Utilities
+  function parseCSVNumbers(s){ return s.split(',').map(x=>parseFloat(x.trim())).filter(x=>!isNaN(x)); }
+  function randUniform(a,b){ return a + Math.random()*(b-a); }
+  function randNormal(){ // Box-Muller
+    let u=0,v=0; while(u===0) u=Math.random(); while(v===0) v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+  }
+
+  // Read UI params
+  function readParams(){
+    const age = parseInt(document.getElementById('age').value);
+    const max_age = parseInt(document.getElementById('max_age').value);
+    const target_age = parseInt(document.getElementById('target_age').value);
+    const R = parseFloat(document.getElementById('R').value);
+    const C = parseFloat(document.getElementById('C').value);
+    const L = parseFloat(document.getElementById('L').value);
+    const Pfi = parseFloat(document.getElementById('Pfi').value);
+    const Rf_ann = parseFloat(document.getElementById('Rf_ann').value);
+    const Ri_ann = parseFloat(document.getElementById('Ri_ann').value);
+    const notarial_fees = parseFloat(document.getElementById('notarial_fees').value)/100.0;
+    const loan_durations = parseCSVNumbers(document.getElementById('loan_durations').value).map(x=>Math.round(x*12));
+    const loan_rates_ann = parseCSVNumbers(document.getElementById('loan_rates').value);
+    const loan_rates_raw = loan_rates_ann.map(r => r/100.0/12.0); // monthly rates
+    const POP_SIZE = parseInt(document.getElementById('POP_SIZE').value);
+    const N_GENERATIONS = parseInt(document.getElementById('N_GENERATIONS').value);
+    const MUT_RATE = parseFloat(document.getElementById('MUT_RATE').value);
+    const ELITE_FRAC = parseFloat(document.getElementById('ELITE_FRAC').value);
+    const I_bounds = parseCSVNumbers(document.getElementById('I_bounds').value);
+    return {age,max_age,target_age,R,C,L,Pfi,Rf_ann,Ri_ann,notarial_fees,loan_durations,loan_rates_raw,POP_SIZE,N_GENERATIONS,MUT_RATE,ELITE_FRAC,I_bounds};
+  }
+
+  // Linear interpolation for loan rate by duration
+  function createLoanRateFn(durations, rates){
+    const pts = durations.map((d,i)=>({d:d,r:rates[i]})).sort((a,b)=>a.d-b.d);
+    return function(N){
+      if(N <= pts[0].d) return pts[0].r;
+      if(N >= pts[pts.length-1].d) return pts[pts.length-1].r;
+      for(let i=0;i<pts.length-1;i++){
+        const a=pts[i], b=pts[i+1];
+        if(N >= a.d && N <= b.d){
+          const t = (N - a.d)/(b.d - a.d);
+          return a.r + t*(b.r - a.r);
+        }
+      }
+      return pts[pts.length-1].r;
+    }
+  }
+
+  // GA helpers (port of opti.py)
+  function random_individual(bounds){
+    return [randUniform(bounds.M[0],bounds.M[1]), randUniform(bounds.t_invest[0],bounds.t_invest[1]), randUniform(bounds.A[0],bounds.A[1]), randUniform(bounds.I[0],bounds.I[1])];
+  }
+  function mutate(x, bounds, MUT_RATE=0.1){
+    const x_new = x.slice();
+    const keys = ['M','t_invest','A','I'];
+    for(let i=0;i<keys.length;i++){
+      if(Math.random() < MUT_RATE){
+        const low = bounds[keys[i]][0], high = bounds[keys[i]][1];
+        const scale = 0.1*(high-low);
+        x_new[i] += randNormal()*scale;
+        if(x_new[i] < low) x_new[i] = low;
+        if(x_new[i] > high) x_new[i] = high;
+      }
+    }
+    return x_new;
+  }
+  function crossover(p1,p2){ const alpha=Math.random(); return p1.map((v,i)=>alpha*v + (1-alpha)*p2[i]); }
+
+  // Core simulation ported from main_gen.py
+  function buildPfFinancial(age,max_age,Pfi,R,C,L,Rf){
+    const total_years = max_age - age;
+    const total_months = total_years*12;
+    const pf = [Pfi];
+    for(let m=0;m<total_months;m++){
+      const prev = pf[pf.length-1];
+      const invest = R - C - L;
+      pf.push(prev * Rf + invest);
+    }
+    return pf;
+  }
+
+  function get_portfolio_time_series(params, M_frac, t_invest, A_frac, I_price, pf_financial_assets, loanRateFn){
+    const {age,max_age,R,C,notarial_fees,Rf,Ri} = params;
+    t_invest = Math.floor(t_invest);
+    const total_years = max_age - age;
+    const total_months = total_years*12;
+    const financial_assets = pf_financial_assets.slice(0,t_invest);
+    const immo_assets = new Array(t_invest).fill(0);
+    const loan_amounts = new Array(t_invest).fill(0);
+    const Nfee = notarial_fees * I_price;
+    // Down payment
+    if((t_invest + 1) >= pf_financial_assets.length) return null;
+    let A = Math.min(A_frac * (pf_financial_assets[t_invest + 1] - Nfee), I_price);
+    if(A < 0.1 * I_price) return null; // loan not granted
+    if(pf_financial_assets[t_invest + 1] < A + Nfee) return null; // not enough
+    // On purchase month
+    financial_assets.push(pf_financial_assets[t_invest + 1] - A - Nfee);
+    let E = I_price - A;
+    immo_assets.push(I_price);
+    loan_amounts.push(E);
+    const M = M_frac * (R - C);
+    const F = R - C - M;
+    const found = find_rate_and_duration(M, E, loanRateFn);
+    if(!found.legal) return null;
+    const {rate,duration} = found;
+    if(duration < 0 || t_invest + duration > total_months) return null;
+    // During loan
+    for(let month = t_invest + 1; month <= t_invest + duration; month++){
+      financial_assets.push(financial_assets[financial_assets.length-1] * Rf + F);
+      immo_assets.push(immo_assets[immo_assets.length-1] * Ri);
+      loan_amounts.push(Math.max(0, loan_amounts[loan_amounts.length-1] - Math.min(M, loan_amounts[loan_amounts.length-1])));
+    }
+    // After loan
+    const F2 = R - C;
+    for(let month = t_invest + 1 + duration; month <= total_months; month++){
+      financial_assets.push(financial_assets[financial_assets.length-1] * Rf + F2);
+      immo_assets.push(immo_assets[immo_assets.length-1] * Ri);
+      loan_amounts.push(0);
+    }
+    return {financial_assets, immo_assets, loan_amounts, E, duration, rate};
+  }
+
+  function find_rate_and_duration(M_abs, E, loanRateFn){
+    if(E === 0) return {legal:true, rate:0, duration:0};
+    // Search integer durations between min and max allowed (1 month .. 25*12)
+    const minN = 1;
+    const maxN = 25*12;
+    let chosenN = -1;
+    let chosenRate = 0;
+    for(let N=minN; N<=maxN; N++){
+      const r = loanRateFn(N);
+      const denom = 1 - Math.pow(1 + r, -N);
+      if(denom <= 0) continue;
+      const M_calc = E * r / denom;
+      if(M_calc <= M_abs + 1e-9){ // can afford
+        chosenN = N; chosenRate = r; break;
+      }
+    }
+    if(chosenN === -1) return {legal:false, rate:0, duration:0};
+    return {legal:true, rate:chosenRate, duration:chosenN};
+  }
+
+  function net_worth(params, pf_financial_assets, loanRateFn, M_frac, t_invest, A_frac, I_price, target_age){
+    const res = get_portfolio_time_series(params, M_frac, t_invest, A_frac, I_price, pf_financial_assets, loanRateFn);
+    if(res === null) return -1e10;
+    const {financial_assets, immo_assets, loan_amounts} = res;
+    const index = (target_age - params.age) * 12;
+    if(index < 0 || index >= financial_assets.length) return -1e10;
+    return financial_assets[index] + immo_assets[index] - loan_amounts[index];
+  }
+
+  // Plot helpers
+  function initPlots(){
+    Plotly.newPlot('mainPlot', [], {title:'Portefeuille', margin:{t:40}, showlegend:true});
+    Plotly.newPlot('plot_value', [], {margin:{t:30}});
+    Plotly.newPlot('plot_t', [], {margin:{t:30}});
+    Plotly.newPlot('plot_I', [], {margin:{t:30}});
+    Plotly.newPlot('plot_M', [], {margin:{t:30}});
+    Plotly.newPlot('plot_duration', [], {margin:{t:30}});
+    Plotly.newPlot('plot_rate', [], {margin:{t:30}});
+  }
+
+  let stopRequested = false;
+
+  async function runOptimization(){
+    stopRequested = false;
+    document.getElementById('stopBtn').disabled = false;
+    document.getElementById('runBtn').disabled = true;
+    const p = readParams();
+    const ages = [];
+    const total_years = p.max_age - p.age;
+    const total_months = total_years*12;
+    for(let m=0;m<=total_months;m++) ages.push(p.age + m/12);
+    const Rf = Math.pow(1 + p.Rf_ann/100.0, 1/12);
+    const Ri = Math.pow(1 + p.Ri_ann/100.0, 1/12);
+    const params = {age:p.age,max_age:p.max_age,R:p.R,C:p.C,notarial_fees:p.notarial_fees,Rf:Rf,Ri:Ri};
+    const pf_financial_assets = buildPfFinancial(p.age,p.max_age,p.Pfi,p.R,p.C,p.L,Rf);
+    const loanRateFn = createLoanRateFn(p.loan_durations, p.loan_rates_raw);
+
+    // bounds
+    const bounds = { M: [0,1], t_invest: [0, total_months], A: [0,1], I: [p.I_bounds[0], p.I_bounds[1]] };
+
+    // initialize population
+    let pop = [];
+    for(let i=0;i<p.POP_SIZE;i++) pop.push(random_individual(bounds));
+
+    const history = {value:[], M:[], t_invest:[], E:[], I:[], duration:[], rate:[] };
+
+    initPlots();
+
+    for(let gen=0; gen<p.N_GENERATIONS; gen++){
+      if(stopRequested) break;
+      // scoring
+      const scores = pop.map(ind => {
+        try{ return net_worth(params, pf_financial_assets, loanRateFn, ind[0], Math.round(ind[1]), ind[2], ind[3], p.target_age); }
+        catch(e){ return -1e9; }
+      });
+      // best
+      let best_idx = 0; for(let i=1;i<scores.length;i++) if(scores[i] > scores[best_idx]) best_idx = i;
+      const best = pop[best_idx];
+      const best_score = scores[best_idx];
+      // status
+      document.getElementById('status').textContent = `Gen ${gen} best=${Math.round(best_score).toLocaleString()}`;
+
+      // selection
+      const elite_size = Math.max(1, Math.floor(p.ELITE_FRAC * p.POP_SIZE));
+      const idxs = scores.map((s,i)=>[s,i]).sort((a,b)=>a[0]-b[0]).map(x=>x[1]);
+      const elite_idx = idxs.slice(-elite_size);
+      const elite = elite_idx.map(i=>pop[i].slice());
+      const minS = Math.min(...scores);
+      let probs = scores.map(s => (s - minS) + 1e-6);
+      const sumP = probs.reduce((a,b)=>a+b,0);
+      probs = probs.map(x=>x/sumP);
+
+      // roulette pick helper
+      function pickIndex(){ const r=Math.random(); let cum=0; for(let i=0;i<probs.length;i++){ cum+=probs[i]; if(r<=cum) return i; } return probs.length-1; }
+
+      let new_pop = elite.slice();
+      while(new_pop.length < p.POP_SIZE){
+        const i1 = pickIndex(); const i2 = pickIndex(); const parents = [pop[i1], pop[i2]];
+        let child = crossover(parents[0], parents[1]);
+        child = mutate(child, bounds, p.MUT_RATE);
+        new_pop.push(child);
+      }
+      pop = new_pop;
+
+      // compute best's portfolio series for plotting
+      const series = get_portfolio_time_series(params, best[0], Math.round(best[1]), best[2], best[3], pf_financial_assets, loanRateFn);
+      if(series!==null){
+        const {financial_assets, immo_assets, loan_amounts, E, duration, rate} = series;
+        history.value.push(best_score);
+        history.M.push(best[0] * (p.R - p.C));
+        history.t_invest.push(best[1]/12);
+        history.E.push(E);
+        history.I.push(best[3]);
+        history.duration.push(duration/12);
+        history.rate.push(rate*12*100);
+
+        // update plots
+        const neg_loans = loan_amounts.map(x=>-x);
+        const mainData = [
+          { x: ages, y: financial_assets, name: 'Actifs financiers', type: 'scatter', mode:'lines', fill:'tozeroy', stackgroup:'one', line:{color:'#66b3ff'} },
+          { x: ages, y: immo_assets, name: 'Actifs immobiliers', type:'scatter', mode:'lines', fill:'tonexty', stackgroup:'one', line:{color:'#99e699'} },
+          { x: ages, y: neg_loans, name: 'Montants des prêts', type:'scatter', mode:'lines', fill:'tozeroy', stackgroup:'loan', line:{color:'#ff9999'} },
+          { x: ages, y: pf_financial_assets, name: 'Actifs financiers purs', mode:'lines', line:{dash:'dash',color:'black',width:2}, yaxis:'y1' }
+        ];
+        Plotly.react('mainPlot', mainData, {title:'Évolution du patrimoine avec investissement immobilier', margin:{t:40}});
+
+        // params plots
+        Plotly.react('plot_value', [{x:history.value.map((_,i)=>i), y:history.value, name:'Patrimoine net', line:{color:'black'}}], {title:'Patrimoine net (€)'});
+        Plotly.react('plot_t', [{x:history.t_invest.map((_,i)=>i), y:history.t_invest, name:'t_invest (ans)', line:{color:'green'}}], {title:'t_invest (années)'});
+        Plotly.react('plot_I', [ {x:history.I.map((_,i)=>i), y:history.I, name:'I (prix)', line:{color:'red'}}, {x:history.E.map((_,i)=>i), y:history.E, name:'E (emprunt)', line:{color:'purple'}} ], {title:'Prix & emprunt (€)'});
+        Plotly.react('plot_M', [{x:history.M.map((_,i)=>i), y:history.M, name:'M (mensualités en €)', line:{color:'brown'}}], {title:'Mensualités (€)'});
+        Plotly.react('plot_duration', [{x:history.duration.map((_,i)=>i), y:history.duration, name:'duration (ans)', line:{color:'orange'}}], {title:'Durée (années)'});
+        Plotly.react('plot_rate', [{x:history.rate.map((_,i)=>i), y:history.rate, name:'rate (%)', line:{color:'blue'}}], {title:'Taux (%)'});
+
+        document.getElementById('bestText').textContent = `Score: ${Math.round(best_score)}\nM_fraction: ${best[0].toFixed(3)}\nt_invest (mois): ${Math.round(best[1])} (${(best[1]/12).toFixed(2)} ans)\nA_frac: ${best[2].toFixed(3)}\nI: ${Math.round(best[3])}\nDuration (y): ${(history.duration[history.duration.length-1]).toFixed(2)}\nRate (%): ${(history.rate[history.rate.length-1]).toFixed(2)}`;
+      }
+
+      // yield to UI every iteration
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    document.getElementById('stopBtn').disabled = true;
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('status').textContent += ' (finished)';
+  }
+
+  document.getElementById('runBtn').addEventListener('click', ()=>{ runOptimization(); });
+  document.getElementById('stopBtn').addEventListener('click', ()=>{ stopRequested = true; document.getElementById('stopBtn').disabled = true; });
+
+  // init
+  initPlots();
+  </script>
+</body>
+</html>

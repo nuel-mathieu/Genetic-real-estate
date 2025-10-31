@@ -1,0 +1,1 @@
+Python scripts that were the starting point of the project. Not linked to the app.
